@@ -1,16 +1,9 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
+using System.ComponentModel.DataAnnotations;
+namespace project.utils.dto;
 
-namespace project.utils.dto
+public class pagQueryDto
 {
-    public class pagQueryDto
-    {
-        public int pageSize { get; set; }
-        public int pageNumber { get; set; }
-        public bool? all { get; set; } = false;
-
-    }
+    [Range(1, 100)] public int pageSize { get; set; } = 20;
+    [Range(1, int.MaxValue)] public int pageNumber { get; set; } = 1;
+    public bool all { get; set; } = false;
 }

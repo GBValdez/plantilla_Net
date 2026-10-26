@@ -1,4 +1,4 @@
-﻿using AutoMapper;
+using project.utils.mapping;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,10 +11,10 @@ using project.utils.dto;
 
 namespace project.utils.catalogues
 {
-    public class cataloguesController : controllerCommons<Catalogue, catalogueCreationDto, catalogueDto, catalogueQueryDto, object, long>
+    public abstract class cataloguesController : controllerCommons<Catalogue, catalogueCreationDto, catalogueDto, catalogueQueryDto, object, long>
     {
-        protected string codCatalogue { get; set; }
-        public cataloguesController(DBProyContext context, IMapper mapper) : base(context, mapper)
+        protected abstract string codCatalogue { get; }
+        public cataloguesController(DBProyContext context, IObjectMapper mapper) : base(context, mapper)
         {
         }
 
@@ -39,9 +39,9 @@ namespace project.utils.catalogues
         }
 
 
-        protected override async Task<errorMessageDto> validPost(Catalogue entity, catalogueCreationDto dtoNew, object queryParams)
+        protected override async Task<errorMessageDto?> validPost(Catalogue entity, catalogueCreationDto dtoNew, object queryParams)
         {
-            errorMessageDto error = await validCataloguePost(entity, dtoNew, queryParams);
+            errorMessageDto? error = await validCataloguePost(entity, dtoNew, queryParams);
             if (error != null)
                 return error;
 
@@ -49,9 +49,9 @@ namespace project.utils.catalogues
             return null;
         }
 
-        protected override async Task<errorMessageDto> validPut(catalogueCreationDto dtoNew, Catalogue entity, object queryParams)
+        protected override async Task<errorMessageDto?> validPut(catalogueCreationDto dtoNew, Catalogue entity, object queryParams)
         {
-            errorMessageDto error = await validCataloguePut(entity, dtoNew, queryParams);
+            errorMessageDto? error = await validCataloguePut(entity, dtoNew, queryParams);
             if (error != null)
                 return error;
 
@@ -61,8 +61,12 @@ namespace project.utils.catalogues
 
         protected Task<catalogueType> getCatalogueType()
         {
-            return context.catalogueTypes.Where(db => db.code == codCatalogue).FirstOrDefaultAsync();
+            return GetRequiredCatalogueType();
         }
+
+        private async Task<catalogueType> GetRequiredCatalogueType() =>
+            await context.catalogueTypes.FirstOrDefaultAsync(db => db.code == codCatalogue && db.deleteAt == null)
+            ?? throw new InvalidOperationException("Configura el tipo de catálogo antes de usarlo.");
 
         protected override async Task<IQueryable<Catalogue>> modifyGet(IQueryable<Catalogue> query, catalogueQueryDto queryParams)
         {
@@ -77,16 +81,10 @@ namespace project.utils.catalogues
             return query.Where(db => db.catalogueTypeId == catalogueType.Id).Include(db => db.catalogueParent);
         }
 
-        // Funciones modificables 
-        protected async virtual Task<errorMessageDto> validCataloguePost(Catalogue entity, catalogueCreationDto dtoNew, object queryParams)
-        {
-            return null;
-        }
+        // Funciones modificables
+        protected virtual Task<errorMessageDto?> validCataloguePost(Catalogue entity, catalogueCreationDto dtoNew, object queryParams) => Task.FromResult<errorMessageDto?>(null);
 
-        protected async virtual Task<errorMessageDto> validCataloguePut(Catalogue entity, catalogueCreationDto dtoNew, object queryParams)
-        {
-            return null;
-        }
+        protected virtual Task<errorMessageDto?> validCataloguePut(Catalogue entity, catalogueCreationDto dtoNew, object queryParams) => Task.FromResult<errorMessageDto?>(null);
 
     }
 }

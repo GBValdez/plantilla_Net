@@ -8,9 +8,11 @@ namespace project.users.dto
 {
     public class clientCreationDto : clientDtoBase
     {
-        public string? userName { get; set; }
+        [Required, StringLength(64), RegularExpression("^[a-zA-Z0-9]+$")]
+        public string userName { get; set; } = string.Empty;
         [Required(ErrorMessage = "El campo Contraseña es requerido")]
-        public string? password { get; set; }
+        [MinLength(8)]
+        public string password { get; set; } = string.Empty;
 
     }
 }

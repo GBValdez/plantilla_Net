@@ -1,12 +1,7 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
+using System.ComponentModel.DataAnnotations;
+namespace project.utils.dto;
 
-namespace project.utils.dto
+public class emailDto
 {
-    public class emailDto
-    {
-        public string email { set; get; }
-    }
+    [Required, EmailAddress] public string email { get; set; } = string.Empty;
 }

@@ -1,10 +1,9 @@
+using System.ComponentModel.DataAnnotations;
+namespace project.users.dto;
 
-namespace project.users.dto
+public class resetPasswordDto
 {
-    public class resetPasswordDto
-    {
-        public string email { get; set; }
-        public string password { get; set; }
-        public string token { get; set; }
-    }
+    [Required] public string email { get; set; } = null!;
+    [Required, MinLength(8)] public string password { get; set; } = null!;
+    [Required] public string token { get; set; } = null!;
 }

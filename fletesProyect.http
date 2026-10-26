@@ -1,6 +1,20 @@
-@fletesProyect_HostAddress = http://localhost:5279
+@baseUrl = http://localhost:5279
+@token = COPIAR_UN_TOKEN_VALIDO
 
-GET {{fletesProyect_HostAddress}}/weatherforecast/
-Accept: application/json
+GET {{baseUrl}}/health
 
-###
+### Sólo en desarrollo
+GET {{baseUrl}}/openapi/v1.json
+
+### Sustituye los datos por una cuenta confirmada
+POST {{baseUrl}}/user/login
+Content-Type: application/json
+
+{
+  "email": "tu-correo@example.com",
+  "password": "TU_CONTRASENA"
+}
+
+### Requiere administrador
+GET {{baseUrl}}/user?pageNumber=1&pageSize=10
+Authorization: Bearer {{token}}

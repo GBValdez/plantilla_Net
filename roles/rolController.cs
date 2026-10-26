@@ -1,4 +1,4 @@
-using AutoMapper;
+using project.utils.mapping;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -20,7 +20,7 @@ namespace project.roles
     {
         private RoleManager<rolEntity> rolManager;
         private UserManager<userEntity> userManager;
-        public rolController(RoleManager<rolEntity> rolManager, DBProyContext contex, IMapper mapper, UserManager<userEntity> userManager) : base(contex, mapper)
+        public rolController(RoleManager<rolEntity> rolManager, DBProyContext contex, IObjectMapper mapper, UserManager<userEntity> userManager) : base(contex, mapper)
         {
             this.rolManager = rolManager;
             this.userManager = userManager;
@@ -39,18 +39,19 @@ namespace project.roles
             {
                 Name = newRegister.name,
             };
-            await rolManager.CreateAsync(newRol);
-            return Ok();
+            var result = await rolManager.CreateAsync(newRol);
+            return result.Succeeded ? Ok() : BadRequest(result.Errors);
         }
 
-        public override async Task<ActionResult> put(rolCreationDto entityCurrent, [FromRoute] string id, [FromQuery] object queryCreation)
+        public override Task<ActionResult> put(rolCreationDto entityCurrent, [FromRoute] string id, [FromQuery] object queryCreation)
         {
-            return BadRequest(new errorMessageDto("No se puede modificar el rol"));
+            return Task.FromResult<ActionResult>(BadRequest(new errorMessageDto("No se puede modificar el rol")));
         }
 
-        protected override async Task<errorMessageDto> validDelete(rolEntity entity)
+        protected override async Task<errorMessageDto?> validDelete(rolEntity entity)
         {
-            IList<userEntity> list = await userManager.GetUsersInRoleAsync(entity.Name);
+            if (entity.Name is "ADMINISTRATOR" or "userNormal") return new errorMessageDto("No se pueden eliminar los roles base de la aplicación.");
+            IList<userEntity> list = await userManager.GetUsersInRoleAsync(entity.Name ?? "");
             if (list.Count > 0)
                 return new errorMessageDto("No se puede eliminar el rol porque esta siendo usado por un usuario");
             return null;

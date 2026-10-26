@@ -16,6 +16,7 @@ namespace project.users.dto
         public DateOnly birthdate { get; set; }
 
         [Required(ErrorMessage = "El campo Correo es requerido")]
+        [EmailAddress]
         public string email { get; set; } = null!;
 
         [Required(ErrorMessage = "El campo Teléfono es requerido")]

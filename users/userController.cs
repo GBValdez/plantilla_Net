@@ -1,13 +1,15 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
-using AutoMapper;
-using fletesProyect.models;
+using System.Text.Encodings.Web;
+using project.utils.mapping;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -17,274 +19,164 @@ using project.users.Models;
 using project.utils;
 using project.utils.dto;
 using project.utils.services;
+namespace project.users;
 
-namespace project.users
+[ApiController]
+[Route("user")]
+[Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme, Roles = "ADMINISTRATOR")]
+public class userController : controllerCommons<userEntity, userUpdateDto, userDto, userQueryDto, object, string>
 {
-    [ApiController]
-    [Route("user")]
-    // [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme, Roles = "ADMINISTRATOR")]
-    public class userController : controllerCommons<userEntity, userUpdateDto, userDto, userQueryDto, object, string>
+    private readonly UserManager<userEntity> users;
+    private readonly SignInManager<userEntity> signIn;
+    private readonly IConfiguration config;
+    private readonly emailService emailSender;
+    private readonly IDataProtector protector;
+    private readonly userSvc registration;
+    protected override bool showDeleted { get; set; } = true;
+    public userController(UserManager<userEntity> users, IConfiguration config, SignInManager<userEntity> signIn,
+        emailService email, IDataProtectionProvider protection, DBProyContext db, IObjectMapper mapper, userSvc registration) : base(db, mapper)
     {
-        //Esto nos va servir para crear nuevos usuarios 
-        private readonly UserManager<userEntity> userManager;
-        private readonly IConfiguration configuration;
-        // Esto nos va a servir para el login
-        private readonly SignInManager<userEntity> signManager;
-        private readonly emailService emailService;
-        private readonly IDataProtector dataProtector;
-        protected override bool showDeleted { get; set; } = true;
-        protected readonly userSvc userSvc;
-        public userController(UserManager<userEntity> userManager, IConfiguration configuration, SignInManager<userEntity> signManager, emailService emailService, IDataProtectionProvider dataProvider, DBProyContext contex, IMapper mapper, userSvc userSvc) : base(contex, mapper)
+        this.users = users; this.config = config; this.signIn = signIn; emailSender = email;
+        protector = protection.CreateProtector("PanelBase.PasswordReset.v1"); this.registration = registration;
+    }
+    // Identity updates must use UserManager, never the generic creation endpoint.
+    [NonAction]
+    public override Task<ActionResult<userDto>> post(userUpdateDto data, [FromQuery] object query) =>
+        Task.FromResult<ActionResult<userDto>>(new NotFoundResult());
+
+    public override async Task<ActionResult> put(userUpdateDto data, [FromRoute] string id, [FromQuery] object queryCreation)
+    {
+        var user = await users.FindByNameAsync(id);
+        if (user is null) return NotFound();
+        if (user.Id == User.FindFirstValue(ClaimTypes.NameIdentifier) &&
+            (!data.status || !data.roles.Contains("ADMINISTRATOR")))
+            return BadRequest(new errorMessageDto("No puedes desactivar tu propia cuenta ni quitarte el rol de administrador."));
+        var knownRoles = await context.Roles.Where(r => r.deleteAt == null).Select(r => r.Name!).ToListAsync();
+        if (data.roles.Any(r => !knownRoles.Contains(r))) return BadRequest(new errorMessageDto("Uno o más roles no existen."));
+        await using var transaction = await context.Database.BeginTransactionAsync();
+        user.deleteAt = data.status ? null : DateTime.UtcNow;
+        var result = await users.UpdateAsync(user);
+        if (!result.Succeeded) return BadRequest(result.Errors);
+        var current = await users.GetRolesAsync(user);
+        result = await users.RemoveFromRolesAsync(user, current.Except(data.roles));
+        if (!result.Succeeded) return BadRequest(result.Errors);
+        result = await users.AddToRolesAsync(user, data.roles.Except(current));
+        if (!result.Succeeded) return BadRequest(result.Errors);
+        // Already issued JWTs expire after the configured short lifetime.
+        await users.UpdateSecurityStampAsync(user);
+        await transaction.CommitAsync();
+        return NoContent();
+    }
+    [HttpGet("{userName}")]
+    public async Task<ActionResult<userDto>> getByUserName(string userName)
+    {
+        var user = await users.FindByNameAsync(userName);
+        if (user is null) return NotFound();
+        var dto = mapper.Map<userDto>(user);
+        dto.roles = (await users.GetRolesAsync(user)).ToList();
+        return dto;
+    }
+    public override async Task<ActionResult> delete(string id)
+    {
+        var user = await users.FindByNameAsync(id);
+        if (user is null) return NotFound();
+        if (user.Id == User.FindFirstValue(ClaimTypes.NameIdentifier))
+            return BadRequest(new errorMessageDto("No puedes desactivar tu propia cuenta."));
+        user.deleteAt = DateTime.UtcNow;
+        var result = await users.UpdateAsync(user);
+        return result.Succeeded ? NoContent() : BadRequest(result.Errors);
+    }
+    [HttpPost("register"), AllowAnonymous, EnableRateLimiting("auth")]
+    public async Task<IActionResult> register(clientCreationDto data)
+    {
+        // Account, assigned role and client are committed together only if email delivery succeeds.
+        await using var transaction = await context.Database.BeginTransactionAsync();
+        var error = await registration.register(mapper.Map<userCreationDto>(data), ["userNormal"]);
+        if (error is not null) return BadRequest(error);
+        var user = await users.FindByEmailAsync(data.email);
+        var client = mapper.Map<Client>(data); client.userId = user!.Id;
+        context.Clients.Add(client);
+        await context.SaveChangesAsync();
+        await transaction.CommitAsync();
+        return NoContent();
+    }
+    protected override async Task<IQueryable<userEntity>> modifyGet(IQueryable<userEntity> query, userQueryDto data)
+    {
+        if (!string.IsNullOrWhiteSpace(data.UserNameCont)) query = query.Where(u => u.UserName != null && u.UserName.Contains(data.UserNameCont));
+        if (!string.IsNullOrWhiteSpace(data.EmailCont)) query = query.Where(u => u.Email != null && u.Email.Contains(data.EmailCont));
+        if (data.roles?.Count > 0)
         {
-            this.userSvc = userSvc;
-            this.userManager = userManager;
-            this.configuration = configuration;
-            this.signManager = signManager;
-            this.emailService = emailService;
-            this.dataProtector = dataProvider.CreateProtector(configuration["keyResetPasswordKey"]);
-
+            var ids = await context.UserRoles.Where(r => data.roles.Contains(r.RoleId)).Select(r => r.UserId).ToListAsync();
+            query = query.Where(u => ids.Contains(u.Id));
         }
-        public override async Task<ActionResult> put(userUpdateDto user, [FromRoute] string id, [FromQuery] object queryCreation)
+        if (data.isActive.HasValue) query = query.Where(u => (u.deleteAt == null) == data.isActive.Value);
+        return query;
+    }
+    [HttpPost("forgotPassword"), AllowAnonymous, EnableRateLimiting("auth")]
+    public async Task<ActionResult> forgotPassword([FromBody] emailDto data)
+    {
+        var user = await users.FindByEmailAsync(data.email);
+        if (user is null || !user.EmailConfirmed || user.deleteAt is not null) return NoContent();
+        var token = await users.GeneratePasswordResetTokenAsync(user);
+        var protectedEmail = Uri.EscapeDataString(protector.Protect(data.email));
+        var protectedToken = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(protector.Protect(token)));
+        var link = config["FrontUrl"]!.TrimEnd('/') + "/user/resetPassword/" + protectedEmail + "/" + protectedToken;
+        await emailSender.SendEmailAsync(new emailSendDto
         {
-            userEntity userDB = await userManager.FindByNameAsync(id);
-
-            if (user.status)
-            {
-                userDB.deleteAt = null;
-            }
-            else if (userDB.deleteAt == null)
-            {
-                userDB.deleteAt = DateTime.Now.ToUniversalTime();
-            }
-            await userManager.UpdateAsync(userDB);
-
-
-            if (userDB == null)
-                return NotFound();
-            IList<string> rolesCurrent = await userManager.GetRolesAsync(userDB);
-            IList<string> rolesAdd = user.roles.Except(rolesCurrent).ToList();
-            IList<string> rolesRemove = rolesCurrent.Except(user.roles).ToList();
-            if (rolesRemove.Count != 0)
-            {
-                IdentityResult resultRemove = await userManager.RemoveFromRolesAsync(userDB, rolesRemove);
-                if (!resultRemove.Succeeded)
-                    return BadRequest(resultRemove.Errors);
-            }
-
-            if (rolesAdd.Count != 0)
-            {
-                IdentityResult resultAdd = await userManager.AddToRolesAsync(userDB, rolesAdd);
-                if (!resultAdd.Succeeded)
-                    return BadRequest(resultAdd.Errors);
-            }
-
-            return NoContent();
-        }
-
-
-        [HttpGet("{userName}")]
-        [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme, Roles = "ADMINISTRATOR")]
-
-        public async Task<ActionResult<userDto>> getByUserName(string userName)
+            email = data.email,
+            subject = "Recupera tu cuenta de PanelBase",
+            message = $"<h1>Recuperar contraseña</h1><a href='{HtmlEncoder.Default.Encode(link)}'>Crear una nueva contraseña</a>"
+        });
+        return NoContent();
+    }
+    [HttpPost("resetPassword"), AllowAnonymous, EnableRateLimiting("auth")]
+    public async Task<ActionResult> resetPassword([FromBody] resetPasswordDto data)
+    {
+        try
         {
-            userEntity user = await userManager.FindByNameAsync(userName);
-            if (user == null)
-                return NotFound();
-            IList<string> roles = await userManager.GetRolesAsync(user);
-            userDto userDto = mapper.Map<userDto>(user);
-            userDto.roles = roles.ToList();
-            return userDto;
+            var address = protector.Unprotect(data.email);
+            var token = protector.Unprotect(Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(data.token)));
+            var user = await users.FindByEmailAsync(address);
+            if (user is null || user.deleteAt is not null) return InvalidLink();
+            var result = await users.ResetPasswordAsync(user, token, data.password);
+            return result.Succeeded ? Ok() : InvalidLink();
         }
-
-
-        [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme, Roles = "ADMINISTRATOR")]
-        public override async Task<ActionResult> delete(string id)
+        catch (Exception error) when (error is CryptographicException or FormatException or ArgumentException) { return InvalidLink(); }
+    }
+    [HttpGet("confirmEmail"), AllowAnonymous, EnableRateLimiting("auth")]
+    public async Task<ActionResult> confirmEmail([FromQuery] string email, [FromQuery] string token)
+    {
+        try
         {
-            userEntity user = await userManager.FindByNameAsync(id);
-            if (user == null)
-                return NotFound();
-            user.deleteAt = DateTime.Now.ToUniversalTime();
-            await userManager.UpdateAsync(user);
-            return NoContent();
+            var user = await users.FindByEmailAsync(email);
+            if (user is null || user.deleteAt is not null) return InvalidLink();
+            var decoded = Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(token));
+            var result = await users.ConfirmEmailAsync(user, decoded);
+            return result.Succeeded ? Ok() : InvalidLink();
         }
+        catch (Exception error) when (error is FormatException or ArgumentException) { return InvalidLink(); }
+    }
+    private BadRequestObjectResult InvalidLink() => BadRequest(new errorMessageDto("El enlace es inválido o ha expirado."));
 
-
-        [HttpPost("register")]
-        [AllowAnonymous]
-        public async Task<IActionResult> register(clientCreationDto newCliente)
-        {
-
-            userCreationDto credentials = mapper.Map<userCreationDto>(newCliente);
-            errorMessageDto error = await userSvc.register(credentials, new List<string> { "userNormal" });
-            if (error != null)
-                return BadRequest(error);
-            userEntity newUser = await userManager.FindByEmailAsync(newCliente.email);
-            Client cliente = mapper.Map<Client>(newCliente);
-            cliente.userId = newUser.Id;
-            context.Clients.Add(cliente);
-            await context.SaveChangesAsync();
-            return NoContent();
-        }
-
-        protected override async Task<IQueryable<userEntity>> modifyGet(IQueryable<userEntity> query, userQueryDto queryParam)
-        {
-
-            if (queryParam.roles != null)
-            {
-                List<string> userWithRoles = await context.UserRoles
-                    .Where(userRole => queryParam.roles.Contains(userRole.RoleId))
-                    .Select(userRole => userRole.UserId)
-                    .ToListAsync();
-                query = query.Where(userDB => userWithRoles.Contains(userDB.Id));
-            }
-            if (queryParam.isActive.HasValue)
-            {
-                if (queryParam.isActive.Value)
-                    query = query.Where(userDB => userDB.deleteAt == null);
-                else
-                    query = query.Where(userDB => userDB.deleteAt != null);
-            }
-            return query;
-        }
-
-        [HttpPost("forgotPassword")]
-        [AllowAnonymous]
-        public async Task<ActionResult> forgotPassword([FromBody] emailDto email)
-        {
-            userEntity user = await userManager.FindByEmailAsync(email.email);
-
-            if (user == null)
-                NoContent();
-
-            if (await userManager.IsEmailConfirmedAsync(user) == false)
-                NoContent();
-
-            if (user.deleteAt != null)
-                NoContent();
-
-            string token = await userManager.GeneratePasswordResetTokenAsync(user);
-            string emailEncrypt = dataProtector.Protect(email.email);
-            string tokenEncrypt = dataProtector.Protect(token);
-            string encodedToken = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(tokenEncrypt));
-
-            emailService.SendEmail(new emailSendDto
-            {
-                email = email.email,
-                subject = "Recuperar contraseña Aeropuerto",
-                message = $"<h1>Recuperar contraseña</h1> <a href='{configuration["FrontUrl"]}/user/resetPassword/{emailEncrypt}/{encodedToken}'>Recuperar contraseña</a>"
-            });
-            return NoContent();
-        }
-
-        [HttpPost("resetPassword")]
-        [AllowAnonymous]
-        public async Task<ActionResult> resetPassword([FromBody] resetPasswordDto resetPassword)
-        {
-            string email = dataProtector.Unprotect(resetPassword.email);
-            userEntity user = await userManager.FindByEmailAsync(email);
-            if (user == null)
-                return BadRequest(new errorMessageDto("El enlace para restablecer la contraseña es inválido o ha expirado."));
-            byte[] decodedToken = WebEncoders.Base64UrlDecode(resetPassword.token);
-            string normalToken = Encoding.UTF8.GetString(decodedToken);
-            string tokenDescrypted = dataProtector.Unprotect(normalToken);
-            IdentityResult result = await userManager.ResetPasswordAsync(user, tokenDescrypted, resetPassword.password);
-            if (result.Succeeded)
-                return Ok();
-            else
-                return BadRequest(result.Errors);
-        }
-
-
-        [HttpGet("confirmEmail")]
-        [AllowAnonymous]
-        public async Task<ActionResult> confirmEmail([FromQuery] string email, [FromQuery] string token)
-        {
-            userEntity user = await userManager.FindByEmailAsync(email);
-            if (user == null)
-                return BadRequest("Usuario no encontrado");
-            byte[] decodedToken = WebEncoders.Base64UrlDecode(token);
-            string normalToken = Encoding.UTF8.GetString(decodedToken);
-            IdentityResult result = await userManager.ConfirmEmailAsync(user, normalToken);
-            if (result.Succeeded)
-                return Ok();
-            else
-                return BadRequest(result.Errors);
-        }
-
-        [HttpPost("login")]
-        [AllowAnonymous]
-        public async Task<ActionResult<authenticationDto>> login(credentialsDto credentials)
-        {
-
-            userEntity EMAIL = await userManager.FindByEmailAsync(credentials.email);
-            if (EMAIL == null)
-                return BadRequest(new errorMessageDto("Credenciales invalidas"));
-
-            if (await userManager.IsEmailConfirmedAsync(EMAIL) == false)
-                return BadRequest(new errorMessageDto("Credenciales invalidas"));
-
-            if (EMAIL.deleteAt != null)
-                return BadRequest(new errorMessageDto("Credenciales invalidas"));
-
-            var result = await signManager.PasswordSignInAsync(EMAIL.UserName, credentials.password, false, false);
-            if (result.Succeeded)
-                return await createToken(credentials);
-            else
-                return BadRequest(new errorMessageDto("Credenciales invalidas"));
-        }
-
-        // [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
-        // [HttpPost("renewToken")]
-        // public async Task<ActionResult<authenticationDto>> renewToken()
-        // {
-        //     Claim email = HttpContext.User.Claims.Where(claim => claim.Type == "email").FirstOrDefault();
-        //     credentialsDto credential = new credentialsDto
-        //     {
-        //         email = email.Value
-        //     };
-        //     return await createToken(credential);
-        // }
-        private async Task<authenticationDto> createToken(credentialsDto credentials)
-        {
-            userEntity user = await userManager.FindByEmailAsync(credentials.email);
-            IList<Claim> claimUser = await userManager.GetClaimsAsync(user);
-            IList<string> roles = await userManager.GetRolesAsync(user);
-            foreach (string rol in roles)
-            {
-                claimUser.Add(new Claim(ClaimTypes.Role, rol));
-            }
-            claimUser.Add(new Claim(ClaimTypes.NameIdentifier, user.Id));
-            claimUser.Add(new Claim(ClaimTypes.Name, user.UserName)); // Agrega el nombre de usuario como un claim
-            Client cliente = await context.Clients.Where(c => c.userId == user.Id && c.deleteAt == null).FirstOrDefaultAsync();
-            if (cliente != null)
-            {
-                claimUser.Add(new Claim("clientId", cliente.Id.ToString()));
-            }
-            Driver driverThis = await context.Drivers.Where(e => e.userId == user.Id && e.deleteAt == null).FirstOrDefaultAsync();
-            if (driverThis != null)
-            {
-                claimUser.Add(new Claim("driverId", driverThis.Id.ToString()));
-            }
-
-            // Estos son los parametros que guardara el webToken
-            List<Claim> claims = new List<Claim>(){
-                new Claim("email", credentials.email),
-            };
-            claims.AddRange(claimUser);
-
-            // Creamos nuestra sensual llave
-            SymmetricSecurityKey key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(configuration["keyJwt"]));
-            SigningCredentials creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-            // Creamos la fecha de expiracion
-            DateTime expiration = DateTime.UtcNow.AddDays(1);
-
-            // Creamos nuestro token
-            JwtSecurityToken securityToken = new JwtSecurityToken(issuer: null, audience: null, claims: claims, expires: expiration, signingCredentials: creds);
-            return new authenticationDto()
-            {
-                token = new JwtSecurityTokenHandler().WriteToken(securityToken),
-                expiration = expiration
-            };
-        }
+    [HttpPost("login"), AllowAnonymous, EnableRateLimiting("auth")]
+    public async Task<ActionResult<authenticationDto>> login(credentialsDto data)
+    {
+        var user = await users.FindByEmailAsync(data.email);
+        if (user is null || !user.EmailConfirmed || user.deleteAt is not null)
+            return BadRequest(new errorMessageDto("Credenciales inválidas."));
+        var result = await signIn.CheckPasswordSignInAsync(user, data.password, lockoutOnFailure: true);
+        if (!result.Succeeded) return BadRequest(new errorMessageDto("Credenciales inválidas."));
+        var roles = await users.GetRolesAsync(user);
+        var claims = new List<Claim> { new("email", user.Email!), new(ClaimTypes.NameIdentifier, user.Id),
+            new(ClaimTypes.Name, user.UserName!), new(JwtRegisteredClaimNames.Sub, user.Id),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()), new("securityStamp", user.SecurityStamp!) };
+        claims.AddRange(roles.Select(r => new Claim(ClaimTypes.Role, r)));
+        var client = await context.Clients.AsNoTracking().FirstOrDefaultAsync(c => c.userId == user.Id && c.deleteAt == null);
+        if (client is not null) claims.Add(new("clientId", client.Id.ToString()));
+        var expiration = DateTime.UtcNow.AddMinutes(config.GetValue<int>("Jwt:LifetimeMinutes", 30));
+        var token = new JwtSecurityToken(issuer: config["Jwt:Issuer"], audience: config["Jwt:Audience"], claims: claims,
+            notBefore: DateTime.UtcNow, expires: expiration, signingCredentials: new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(config["Jwt:Key"]!)), SecurityAlgorithms.HmacSha256));
+        return new authenticationDto { token = new JwtSecurityTokenHandler().WriteToken(token), expiration = expiration };
     }
 }

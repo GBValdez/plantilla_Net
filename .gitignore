@@ -365,3 +365,20 @@ FodyWeavers.xsd
 # archivos con configuraciones de desarrollo y produccion
 **/appsettings.development.json
 **/appsettings.production.json
+
+# Configuración local y herramientas de esta plantilla
+**/node_modules/
+**/.angular/
+**/dist/
+**/bin/
+**/obj/
+**/.vs/
+**/test-results/
+**/playwright-report/
+**/appsettings.Local.json
+.env
+.env.*
+!.env.example
+
+
+.serena/

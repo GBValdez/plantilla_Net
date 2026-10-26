@@ -2,39 +2,29 @@ using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using project.utils.interfaces;
+namespace project.utils.services;
 
-namespace project.utils.services
+public class interceptorDb(IHttpContextAccessor accessor) : SaveChangesInterceptor
 {
-    public class interceptorDb : SaveChangesInterceptor
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
     {
-        private readonly HttpContext httpContext;
-        public interceptorDb(IHttpContextAccessor httpContextAccessor)
+        ApplyAudit(eventData); return base.SavingChangesAsync(eventData, result, cancellationToken);
+    }
+    public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
+    {
+        ApplyAudit(eventData); return base.SavingChanges(eventData, result);
+    }
+    private void ApplyAudit(DbContextEventData data)
+    {
+        if (data.Context is null) return;
+        var id = accessor.HttpContext?.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        foreach (var entry in data.Context.ChangeTracker.Entries<ICommonModelHeader>())
         {
-            httpContext = httpContextAccessor.HttpContext;
-        }
-
-        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
-        {
-            addUpdate(eventData);
-            return base.SavingChangesAsync(eventData, result, cancellationToken);
-        }
-
-        public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
-        {
-            addUpdate(eventData);
-            return base.SavingChanges(eventData, result);
-        }
-        private void addUpdate(DbContextEventData eventData)
-        {
-            string id = httpContext.User.FindFirstValue(ClaimTypes.NameIdentifier);
-            foreach (var entry in eventData.Context.ChangeTracker.Entries<ICommonModelHeader>())
+            if (entry.State == EntityState.Added) entry.Entity.createAt = DateTime.UtcNow;
+            if (entry.State is EntityState.Added or EntityState.Modified)
             {
-                if (entry.State == EntityState.Added || entry.State == EntityState.Modified)
-                {
-                    entry.Entity.userUpdateId = id;
-                }
+                entry.Entity.userUpdateId = id; entry.Entity.updateAt = DateTime.UtcNow;
             }
         }
-
     }
 }

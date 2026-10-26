@@ -8,7 +8,7 @@ namespace project.utils.dto
     public class resPag<T>
     {
 
-        public List<T> items { get; set; }
+        public List<T> items { get; set; } = [];
         public int total { get; set; }
         public int totalPages { get; set; }
 

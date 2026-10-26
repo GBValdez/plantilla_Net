@@ -6,7 +6,7 @@ namespace project.utils
 {
     public class CommonsModel<idClass> : ICommonModel<idClass>
     {
-        public idClass Id { get; set; }
+        public idClass Id { get; set; } = default!;
 
         public string? userUpdateId { get; set; }
 

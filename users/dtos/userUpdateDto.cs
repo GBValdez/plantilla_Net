@@ -1,9 +1,8 @@
+using System.ComponentModel.DataAnnotations;
+namespace project.users.dto;
 
-namespace project.users.dto
+public class userUpdateDto
 {
-    public class userUpdateDto
-    {
-        public Boolean status { get; set; }
-        public List<string> roles { get; set; }
-    }
+    public bool status { get; set; }
+    [Required] public List<string> roles { get; set; } = [];
 }
